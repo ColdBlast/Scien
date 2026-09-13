@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+      body { margin: 0; padding: 10px; background-color: #f8f9fa; font-family: sans-serif; }
+      #plotDiv { width: 100%; height: 600px; background-color: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    </style>
+  </head>
+  <body>
+    <div id="plotDiv"></div>
+    <script>
+      // The JSON payload injected directly from Code.gs
+      const data = JSON.parse(<?= plotData ?>);
+
+      const mainTitle = data.plotTitle;
+      const xAxisLabel = data.xTitle + (data.xUnits ? ` [${data.xUnits}]` : '');
+      const yAxisLabel = data.yTitle + (data.yUnits ? ` [${data.yUnits}]` : '');
+      const trace = {
+        x: data.xVals,
+        y: data.yVals,
+        mode: 'markers',
+        type: 'scatter',
+        name: 'Data',
+        error_x: {
+          type: 'data',
+          array: data.xUncs,
+          visible: true,
+          color: '#333333',
+          thickness: 1.5,
+          width: 3
+        },
+        error_y: {
+          type: 'data',
+          array: data.yUncs,
+          visible: true,
+          color: '#333333',
+          thickness: 1.5,
+          width: 3
+        },
+        marker: { size: 8, color: '#1f77b4', line: { color: '#005293', width: 1 } }
+      };
+
+      const layout = {
+    title: { text: mainTitle, font: { family: 'Arial, sans-serif', size: 18 } },
+    xaxis: { title: { text: xAxisLabel }, zeroline: false },
+    yaxis: { title: { text: yAxisLabel }, zeroline: false },
+    hovermode: 'closest',
+    plot_bgcolor: '#fafafa',
+    paper_bgcolor: 'white'
+      };
+
+      const config = { responsive: true, displaylogo: false };
+
+      Plotly.newPlot('plotDiv', [trace], layout, config);
+    </script>
+  </body>
+</html>
