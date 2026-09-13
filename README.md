@@ -1,5 +1,5 @@
 # Scien
-A spreadsheet for science and engineering, not finance (a lightweight prototype)
+A spreadsheet for science and engineering, instead of finance (a lightweight prototype)
 
 Spreadsheets were designed for finance.  But scientists and engineers use them extensively, and it often feels like we are trying to shove a square peg into a round hole.
 Wouldn't it be great if there were a spreadsheet package designed for science and engineering, from the ground up?  One that understands (and propagates) units and uncertainty?
