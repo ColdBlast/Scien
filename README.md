@@ -10,4 +10,4 @@ It uses the framework of tabs within a conventional spreadsheet to emulate stori
 Right now it's aimed at the students I teach, an intro-level tool with intro-level capabilities; more of a teaching tool than a workhorse.  But try it and you'll see the promise!
 
 I've had this idea rattling around in my head for a long time, but now I have the time to pursue it.  The last time I considered doing so, I was both inspired and defeated by
-Matt McCutcheon's Measurements extension (https://mattmccutchen.net/measurements/), because it demonstrated possibility but also limited pursuing it to a passion project.
+Matt McCutchen's Measurements extension (https://mattmccutchen.net/measurements/), because it demonstrated possibility but also limited pursuing it to a passion project.
