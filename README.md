@@ -1,5 +1,5 @@
 # Scien
-A spreadsheet for science and engineering, instead of finance (a lightweight prototype)
+A spreadsheet built for science and engineering — not finance (a lightweight prototype)
 
 Spreadsheets were designed for finance.  But scientists and engineers use them extensively, and it often feels like we are trying to shove a square peg into a round hole.
 Wouldn't it be great if there were a spreadsheet package designed for science and engineering, from the ground up?  One that understands (and propagates) units and uncertainty?
@@ -10,4 +10,5 @@ It uses the framework of tabs within a conventional spreadsheet to emulate stori
 Right now it's aimed at the students I teach, an intro-level tool with intro-level capabilities; more of a teaching tool than a workhorse.  But try it and you'll see the promise!
 
 I've had this idea rattling around in my head for a long time, but now I have the time to pursue it.  The last time I considered doing so, I was both inspired and defeated by
-Matt McCutchen's Measurements extension (https://mattmccutchen.net/measurements/), because it demonstrated possibility but also limited pursuing it to a passion project.
+Matt McCutchen's public domain Measurements extension (https://mattmccutchen.net/measurements/), because it demonstrated possibility but also limited pursuit to a passion project.
+The unit handling in Scien is inspired by Matt's approach, but Scien otherwise approaches things somewhat differently.  It runs in Google Sheets as an Add-In, coded in Apps Script.
