@@ -1,16 +1,48 @@
 /**
  * Complete 3D Spreadsheet Engine with Range Functions (AVERAGE, STDEV),
- * Powers, SQRT, Quadrature Error Propagation, and Unit Simplification
+ * Powers, SQRT, Quadrature Error Propagation, Unit Simplification,
+ * and Temperature Reading/Difference Formatting (°C, °F, °R, K).
  */
 
 function onOpen() {
+  const mode = getUncertaintyMode();
+  const modeLabel = mode === 'WORST_CASE' ? 'Worst Case' : 'Random (RSS)';
+
   SpreadsheetApp.getUi()
-    .createMenu('SciEng Tools')
+    .createMenu('Scien Tools')
+    .addItem(`Toggle Uncertainty Mode (Current: ${modeLabel})`, 'toggleUncertaintyMode')
+    .addSeparator()
     .addItem('Undo Last 3D Edit', 'undoLastAction')
     .addItem('Re-Sync All Sheets', 'syncBackendSheets')
     .addItem('Restore Formula for Editing', 'restoreFormulaForActiveCell')
-    .addItem('Plot Selected Data (X, Y)', 'openPlotDialog') // New addition
+    .addItem('Plot Selected Data (X, Y)', 'openPlotDialog')
     .addToUi();
+}
+
+function getUncertaintyMode() {
+  if (cachedUncertaintyMode) return cachedUncertaintyMode;
+  cachedUncertaintyMode = PropertiesService.getDocumentProperties().getProperty('UNCERTAINTY_MODE') || 'QUADRATURE';
+  return cachedUncertaintyMode;
+}
+
+let cachedUncertaintyMode = null;
+
+function toggleUncertaintyMode() {
+  const props = PropertiesService.getDocumentProperties();
+  const currentMode = getUncertaintyMode();
+  const newMode = (currentMode === 'WORST_CASE') ? 'QUADRATURE' : 'WORST_CASE';
+  
+  props.setProperty('UNCERTAINTY_MODE', newMode);
+  cachedUncertaintyMode = newMode;
+  
+  const label = (newMode === 'WORST_CASE') 
+    ? 'Worst Case (Linear Sum)' 
+    : 'Random Error (Quadrature / RSS)';
+    
+  SpreadsheetApp.getActiveSpreadsheet().toast(`Mode changed to: ${label}`, 'Scien Settings', 5);
+  
+  onOpen();
+  syncBackendSheets();
 }
 
 function onEdit(e) {
@@ -47,7 +79,6 @@ function onEdit(e) {
     const siUnits = convertToSIBase(parsed.unit);
     updateTargetSheets(row, col, parsed.value, parsed.uncertainty, siUnits, rawInput);
     
-    // Explicitly pass parsed.uncStr so the display matches your typing
     const displayString = formatMeasurementDisplay(parsed.value, parsed.uncertainty, parsed.unit, parsed.uncStr);
     range.setValue(displayString);
   }
@@ -55,7 +86,6 @@ function onEdit(e) {
 
 function processFormulaEntry(e, targetRow, targetCol, formulaStr) {
   const cleanFormula = formulaStr.replace(/^[=+]/, '').trim();
-  
   const result = evaluate3DExpression(cleanFormula);
 
   if (result.error) {
@@ -69,18 +99,16 @@ function processFormulaEntry(e, targetRow, targetCol, formulaStr) {
   e.range.setNote(`Calculated from: ${formulaStr}`);
 
   const displayUnit = simplifyAndConvertUnits(result.unit);
-  const displayStr = formatMeasurementDisplay(result.v, result.u, displayUnit);
+  const displayStr = formatMeasurementDisplay(result.v, result.u, displayUnit, null, result.isDifference);
   e.range.setValue(displayStr);
 }
 
 function evaluate3DExpression(expression) {
   let cleanExpr = expression.replace(/\s+/g, '').trim();
 
-  // 1. Evaluate range/single functions first and replace with placeholders
   const funcResults = {};
   let funcIndex = 0;
   
-  // Match range functions: AVERAGE(A1:A3), STDEV(A1:A3), etc.
   let rangeFuncPattern = /([A-Z.]+)\(([A-Z]+\d+:[A-Z]+\d+)\)/i;
   let match;
   
@@ -113,7 +141,6 @@ function evaluate3DExpression(expression) {
     funcIndex++;
   }
 
-  // Match single-cell functions like SQRT(A1)
   let singleFuncPattern = /([A-Z.]+)\(([A-Z]+\d+)\)/i;
   while ((match = cleanExpr.match(singleFuncPattern))) {
     const funcName = match[1].toUpperCase();
@@ -138,14 +165,13 @@ function evaluate3DExpression(expression) {
     funcIndex++;
   }
 
-  // 2. Shunting-Yard Parser for operators (+, -, *, /, ^, parentheses)
   cleanExpr = cleanExpr.replace(/(^|\()(-)/g, '$10$2');
   
   const tokens = cleanExpr.match(/(_FUNC_\d+_|[A-Z]+\d+|(?:\d*\.\d+|\d+)|[+\-*/^()])/gi);
   if (!tokens) return { error: "Invalid expression syntax" };
 
   const precedence = { '+': 1, '-': 1, '*': 2, '/': 2, '^': 3 };
-  const associativity = { '^': 'right' }; // Right-associative for exponents
+  const associativity = { '^': 'right' };
   
   const output = [];
   const opStack = [];
@@ -218,21 +244,36 @@ function evaluate3DExpression(expression) {
 
 const Propagate3D = {
   add: function(a, b) {
-    if (a.unit !== b.unit) return { error: `Cannot add ${a.unit || 'none'} and ${b.unit || 'none'}` };
-    return { v: a.v + b.v, u: Math.sqrt(Math.pow(a.u, 2) + Math.pow(b.u, 2)), unit: a.unit };
+    if (!areUnitsCompatibleForAddSub(a.unit, b.unit)) return { error: `Cannot add ${a.unit || 'none'} and ${b.unit || 'none'}` };
+    const mode = getUncertaintyMode();
+    const u = (mode === 'WORST_CASE') 
+      ? Math.abs(a.u) + Math.abs(b.u) 
+      : Math.sqrt(Math.pow(a.u, 2) + Math.pow(b.u, 2));
+    return { v: a.v + b.v, u: u, unit: resolveAddSubUnit(a.unit, b.unit, false) };
   },
 
   subtract: function(a, b) {
-    if (a.unit !== b.unit) return { error: `Cannot subtract ${b.unit || 'none'} from ${a.unit || 'none'}` };
-    return { v: a.v - b.v, u: Math.sqrt(Math.pow(a.u, 2) + Math.pow(b.u, 2)), unit: a.unit };
+    if (!areUnitsCompatibleForAddSub(a.unit, b.unit)) return { error: `Cannot subtract ${b.unit || 'none'} from ${a.unit || 'none'}` };
+    const mode = getUncertaintyMode();
+    const u = (mode === 'WORST_CASE') 
+      ? Math.abs(a.u) + Math.abs(b.u) 
+      : Math.sqrt(Math.pow(a.u, 2) + Math.pow(b.u, 2));
+    // Subtracting absolute temperatures produces a temperature difference
+    const isTemp = /°?[CFRK]/i.test(a.unit);
+    return { v: a.v - b.v, u: u, unit: resolveAddSubUnit(a.unit, b.unit, true) };
   },
 
   multiply: function(a, b) {
     const val = a.v * b.v;
     const relA = a.v !== 0 ? a.u / a.v : 0;
     const relB = b.v !== 0 ? b.u / b.v : 0;
-    const unc = Math.abs(val) * Math.sqrt(Math.pow(relA, 2) + Math.pow(relB, 2));
     
+    const mode = getUncertaintyMode();
+    const relResult = (mode === 'WORST_CASE') 
+      ? Math.abs(relA) + Math.abs(relB) 
+      : Math.sqrt(Math.pow(relA, 2) + Math.pow(relB, 2));
+      
+    const unc = Math.abs(val) * relResult;
     const newUnit = UnitMath.format(UnitMath.operate(a.unit, b.unit, 'multiply'));
     return { v: val, u: unc, unit: newUnit };
   },
@@ -242,8 +283,13 @@ const Propagate3D = {
     const val = a.v / b.v;
     const relA = a.v !== 0 ? a.u / a.v : 0;
     const relB = b.v !== 0 ? b.u / b.v : 0;
-    const unc = Math.abs(val) * Math.sqrt(Math.pow(relA, 2) + Math.pow(relB, 2));
-
+    
+    const mode = getUncertaintyMode();
+    const relResult = (mode === 'WORST_CASE') 
+      ? Math.abs(relA) + Math.abs(relB) 
+      : Math.sqrt(Math.pow(relA, 2) + Math.pow(relB, 2));
+      
+    const unc = Math.abs(val) * relResult;
     const newUnit = UnitMath.format(UnitMath.operate(a.unit, b.unit, 'divide'));
     return { v: val, u: unc, unit: newUnit };
   },
@@ -252,8 +298,7 @@ const Propagate3D = {
     if (a.v === 0 && n < 0) return { error: 'Division by zero in power' };
     const val = Math.pow(a.v, n);
     const relA = a.v !== 0 ? a.u / a.v : 0;
-    const unc = Math.abs(val) * Math.abs(n) * relA;
-
+    const unc = Math.abs(val) * Math.abs(n) * Math.abs(relA);
     const newUnit = UnitMath.format(UnitMath.power(a.unit, n));
     return { v: val, u: unc, unit: newUnit };
   },
@@ -307,7 +352,7 @@ function calcAverage(items) {
   const avgVal = sumVal / n;
   const avgUnc = (1 / n) * Math.sqrt(sumSqUnc);
 
-  return { v: avgVal, u: avgUnc, unit: unit };
+  return { v: avgVal, u: avgUnc, unit: unit, isDifference: items[0].isDifference };
 }
 
 function calcStdev(items, isPopulation) {
@@ -332,34 +377,40 @@ function calcStdev(items, isPopulation) {
   const stdevVal = Math.sqrt(sumSqDiff / divisor);
   const stdevUnc = Math.sqrt(sumSqUnc);
 
-  return { v: stdevVal, u: stdevUnc, unit: unit };
+  return { v: stdevVal, u: stdevUnc, unit: unit, isDifference: items[0].isDifference };
 }
 
-function formatMeasurementDisplay(value, uncertainty, unit, rawUncStr = null) {
+/**
+ * Formats temperature units based on reading vs. difference rules.
+ */
+function formatTemperatureUnit(unitStr) {
+  if (!unitStr) return '';
+  return unitStr.trim();
+}
+
+function formatMeasurementDisplay(value, uncertainty, unit, rawUncStr = null, isDifference = false) {
+  const formattedUnit = formatTemperatureUnit(unit);
+
   if (uncertainty === undefined || uncertainty === null || uncertainty === 0) {
-    return `${value}` + (unit ? ` ${unit}` : '');
+    return `${value}` + (formattedUnit ? ` ${formattedUnit}` : '');
   }
 
   const absUnc = Math.abs(uncertainty);
   
-  // Convert to scientific notation to safely extract magnitude and first digit without floating-point errors
   const [mantissaStr, expStr] = absUnc.toExponential().split('e');
   const firstDigit = parseInt(mantissaStr.replace('.', '')[0], 10);
   const magnitude = parseInt(expStr, 10);
 
-  // Standard maximum allowed SF: 2 if leading digit is 1 or 2, otherwise 1
   const maxSF = (firstDigit === 1 || firstDigit === 2) ? 2 : 1;
   let sf = maxSF;
 
   if (rawUncStr) {
-    // Determine the exact number of typed significant figures in the uncertainty
     let str = String(rawUncStr).trim().replace(/^[+-]/, '').split(/e/i)[0];
     let digits = str.includes('.') 
       ? str.replace(/^0+\.?0*/, '').replace('.', '') 
       : str.replace(/^0+/, '');
     let typedSF = digits.length > 0 ? digits.length : 1;
 
-    // Respect fewer typed SF, but cap over-typed values at maxSF
     sf = Math.min(typedSF, maxSF);
   }
 
@@ -377,7 +428,7 @@ function formatMeasurementDisplay(value, uncertainty, unit, rawUncStr = null) {
     uncStr = roundedUnc.toFixed(0);
   }
 
-  return `${valStr} ± ${uncStr}` + (unit ? ` ${unit}` : '');
+  return `${valStr} ± ${uncStr}` + (formattedUnit ? ` ${formattedUnit}` : '');
 }
 
 function saveUndoState(e, row, col) {
@@ -516,8 +567,7 @@ function syncBackendSheets() {
           const siUnits = convertToSIBase(parsed.unit);
           updateTargetSheets(targetRow, targetCol, parsed.value, parsed.uncertainty, siUnits, cellValue);
           
-          // Re-draws the cell using your exact input precision
-          const displayString = formatMeasurementDisplay(parsed.value, parsed.uncertainty, parsed.unit, parsed.uncStr);
+          const displayString = formatMeasurementDisplay(parsed.value, parsed.uncertainty, parsed.unit, parsed.uncStr, parsed.isDifference);
           inputSheet.getRange(targetRow, targetCol).setValue(displayString);
         }
       }
@@ -569,24 +619,129 @@ function get3DCellData(a1Notation) {
 
   if (!valSheet || !uncSheet || !unitSheet) return null;
 
+  const unit = String(unitSheet.getRange(a1Notation).getValue() || '').trim();
+
   return {
     v: Number(valSheet.getRange(a1Notation).getValue()) || 0,
     u: Number(uncSheet.getRange(a1Notation).getValue()) || 0,
-    unit: String(unitSheet.getRange(a1Notation).getValue() || '').trim()
+    unit: unit,
   };
+}
+
+/**
+ * Normalizes temperature units on input (readings vs. differences)
+ * and converts 'deg' or 'o' text fallbacks.
+ */
+function normalizeTemperatureUnits(unitStr) {
+  if (!unitStr) return '';
+  let u = unitStr.trim();
+  
+  // 1. Temperature differences (Suffix °): Cdeg, Co, Fdeg, Fo, Rdeg, Ro, Kdeg, Ko -> C°, F°, R°, K°
+  u = u.replace(/\b([CFRK])(?:°|deg|o|\u00B0)\b/gi, (m, p1) => p1.toUpperCase() + '°');
+  
+  // 2. Temperature readings (Prefix °): degC, oC, degF, oF, degR, oR -> °C, °F, °R
+  u = u.replace(/\b(?:°|deg|o|\u00B0)([CFR])\b/gi, (m, p1) => '°' + p1.toUpperCase());
+  
+  // 3. Kelvin readings (No °): degK, oK -> K
+  u = u.replace(/\b(?:°|deg|o|\u00B0)K\b/gi, 'K');
+  
+  // 4. Clean up any literal °K entered by mistake back to standard K
+  u = u.replace(/°K\b/gi, 'K');
+  
+  return u;
+}
+
+/**
+ * Maps a temperature unit (both absolute and difference) to its scale family base.
+ * Celsius and Kelvin share a scale size. Fahrenheit and Rankine share a scale size.
+ *
+ * @param {string} unitStr - The normalized unit string (e.g., "°C", "K°", "m/s")
+ * @return {string} The family identifier or the original unit if not a temperature.
+ */
+function getTemperatureFamilyBase(unitStr) {
+  if (!unitStr) return '';
+  let u = unitStr.trim().toUpperCase();
+  
+  // Check if it's a temperature unit
+  const isTemp = u.includes('°') || u === 'K';
+  if (!isTemp) return unitStr;
+  
+  // Strip out the degree symbol and spaces to isolate the scale letter
+  const baseLetter = u.replace(/°/g, '').trim();
+  
+  if (baseLetter === 'C' || baseLetter === 'K') {
+    return 'TEMP_CELSIUS_KELVIN';
+  }
+  if (baseLetter === 'F' || baseLetter === 'R') {
+    return 'TEMP_FAHRENHEIT_RANKINE';
+  }
+  
+  return unitStr;
+}
+
+/**
+ * Checks if two units are identical or belong to the same temperature scale family.
+ */
+function areUnitsCompatibleForAddSub(unit1, unit2) {
+  if (!unit1 && !unit2) return true;
+  
+  const family1 = getTemperatureFamilyBase(unit1);
+  const family2 = getTemperatureFamilyBase(unit2);
+  
+  if (family1.startsWith('TEMP_') && family2.startsWith('TEMP_')) {
+    return family1 === family2;
+  }
+  
+  return unit1 === unit2;
+}
+
+/**
+ * Determines the resulting unit when adding or subtracting two compatible units.
+ * Applies thermodynamic rules for temperature absolutes vs differences.
+ * 
+ * @param {string} unit1 - The first normalized unit (e.g., "K°", "°C")
+ * @param {string} unit2 - The second normalized unit
+ * @param {boolean} isSubtraction - True if the operation is subtraction
+ * @return {string} The resolved output unit
+ */
+function resolveAddSubUnit(unit1, unit2, isSub) {
+  if (!unit1 || !unit2) return unit1 || unit2 || '';
+
+  const fam = getTemperatureFamilyBase(unit1);
+  if (!fam.startsWith('TEMP_')) return unit1;
+
+  // Safe difference check that ignores hidden trailing spaces
+  const isDiff1 = /([CFRK])°/i.test(unit1);
+  const isDiff2 = /([CFRK])°/i.test(unit2);
+
+  if (!isSub) {
+    // ADDITION: If either unit is Absolute, the result is Absolute
+    return (!isDiff1) ? unit1 : (!isDiff2) ? unit2 : unit1;
+  } else {
+    // SUBTRACTION: Absolute - Absolute = Difference (e.g. °C - °C = C°)
+    if (!isDiff1 && !isDiff2) {
+      const baseLetter = unit1.replace(/[^CFRK]/g, '');
+      return baseLetter + '°';
+    }
+    // Absolute - Difference = Absolute; Difference - Difference = Difference
+    return unit1;
+  }
 }
 
 function parseMeasurement(inputStr) {
   const regex = /^([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*(?:±|\+\/-|\+-)\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*(.*)$/;
   const match = inputStr.match(regex);
-
+  
   if (!match) return null;
-
+  
+  const rawUnit = match[3] ? match[3].trim() : '';
+  const normalizedUnit = normalizeTemperatureUnits(rawUnit);
+  
   return {
     value: parseFloat(match[1]),
     uncertainty: match[2] ? parseFloat(match[2]) : 0,
-    uncStr: match[2] ? match[2].trim() : '', // Captures raw string 
-    unit: match[3] ? match[3].trim() : ''
+    uncStr: match[2] ? match[2].trim() : '',
+    unit: normalizedUnit,
   };
 }
 
@@ -594,13 +749,15 @@ function convertToSIBase(unitStr) {
   if (!unitStr) return '';
   const siDerivedMap = {
     'N': 'kg·m/s²', 'J': 'kg·m²/s²', 'W': 'kg·m²/s³',
-    'Pa': 'kg/(m·s²)', 'Hz': '1/s', 'C': 'A·s',
+    'Pa': 'kg/(m·s²)', 'Hz': '1/s',
     'V': 'kg·m²/(A·s³)', 'F': 'A²·s⁴/(kg·m²)', 'Ω': 'kg·m²/(A·s³)'
   };
   let normalized = unitStr;
   for (const [derived, base] of Object.entries(siDerivedMap)) {
     normalized = normalized.replace(new RegExp(`\\b${derived}\\b`, 'g'), base);
   }
+  // Convert Coulombs 'C' safely without altering °C or C° temperature units
+  normalized = normalized.replace(/(?<![°])\bC\b(?![°])/g, 'A·s');
   return normalized;
 }
 
@@ -657,110 +814,6 @@ function openPlotDialog() {
   const col = range.getColumn();
   const numRows = range.getNumRows();
 
-  // 1. Determine Defaults
-  const defaultPlotTitle = ss.getName();
-  let defaultXTitle = 'X Axis';
-  let defaultYTitle = 'Y Axis';
-
-  // Grab the text from the cells immediately above the selection
-  if (row > 1) {
-    defaultXTitle = sheet.getRange(row - 1, col).getDisplayValue() || 'X Axis';
-    defaultYTitle = sheet.getRange(row - 1, col + 1).getDisplayValue() || 'Y Axis';
-  }
-
-  // 2. Create the Configuration Form UI
-  const htmlContent = `
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <style>
-          body { font-family: Arial, sans-serif; padding: 15px; color: #333; }
-          .group { margin-bottom: 18px; }
-          label { display: block; font-weight: bold; margin-bottom: 5px; }
-          input { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
-          .hint { font-size: 11px; color: #666; margin-top: 4px; }
-          button { background-color: #1a73e8; color: white; border: none; padding: 10px; cursor: pointer; border-radius: 4px; font-weight: bold; width: 100%; }
-          button:hover { background-color: #1557b0; }
-        </style>
-      </head>
-      <body>
-        <div class="group">
-          <label>Plot Title</label>
-          <input type="text" id="plotTitle" value="${defaultPlotTitle.replace(/"/g, '&quot;')}">
-          <div class="hint">Type free text, or enter a cell reference (e.g., A1)</div>
-        </div>
-        <div class="group">
-          <label>X-Axis Title</label>
-          <input type="text" id="xTitle" value="${defaultXTitle.replace(/"/g, '&quot;')}">
-          <div class="hint">Type free text, or enter a cell reference</div>
-        </div>
-        <div class="group">
-          <label>Y-Axis Title</label>
-          <input type="text" id="yTitle" value="${defaultYTitle.replace(/"/g, '&quot;')}">
-          <div class="hint">Type free text, or enter a cell reference</div>
-        </div>
-        <button onclick="submitAndPlot()" id="btn">Generate Plot</button>
-
-        <script>
-          function submitAndPlot() {
-            const btn = document.getElementById('btn');
-            btn.disabled = true;
-            btn.innerText = 'Processing...';
-            
-            const config = {
-              plotTitle: document.getElementById('plotTitle').value,
-              xTitle: document.getElementById('xTitle').value,
-              yTitle: document.getElementById('yTitle').value,
-              row: ${row},
-              col: ${col},
-              numRows: ${numRows}
-            };
-            
-            google.script.run
-              .withSuccessHandler(google.script.host.close)
-              .generateFinalPlot(config);
-          }
-        </script>
-      </body>
-    </html>
-  `;
-
-  const html = HtmlService.createHtmlOutput(htmlContent)
-    .setWidth(350)
-    .setHeight(380);
-
-  SpreadsheetApp.getUi().showModalDialog(html, 'Plot Settings');
-}
-
-function generateFinalPlot(config) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('Input Interface');
-  
-  // Resolves inputs: checks if it's a valid cell A1 notation, otherwise returns free text
-  function resolveInput(input) {
-    const trimmed = String(input).trim();
-    if (!trimmed) return '';
-    
-    try {
-      const range = sheet.getRange(trimmed);
-      if (range.getNumRows() === 1 && range.getNumColumns() === 1) {
-        const cellValue = range.getDisplayValue();
-        return cellValue !== '' ? cellValue : trimmed;
-      }
-    } catch (e) {
-      // Input was standard text (like "Time (s)"), so getRange failed. Return the text.
-    }
-    return trimmed;
-  }
-
-  const plotTitle = resolveInput(config.plotTitle);
-  const xTitle = resolveInput(config.xTitle);
-  const yTitle = resolveInput(config.yTitle);
-
-  const row = config.row;
-  const col = config.col;
-  const numRows = config.numRows;
-
   const valSheet = ss.getSheetByName('Values');
   const uncSheet = ss.getSheetByName('Uncertainties');
   const unitSheet = ss.getSheetByName('Units');
@@ -773,45 +826,36 @@ function generateFinalPlot(config) {
   const xUnits = unitSheet.getRange(row, col, numRows, 1).getValues().flat().find(u => u) || '';
   const yUnits = unitSheet.getRange(row, col + 1, numRows, 1).getValues().flat().find(u => u) || '';
 
-  // Bundle the resolved titles into the payload
-  const plotData = { 
-    xVals, yVals, xUncs, yUncs, xUnits, yUnits,
-    plotTitle, xTitle, yTitle
-  };
+  const plotData = { xVals, yVals, xUncs, yUncs, xUnits, yUnits };
 
   const htmlTemplate = HtmlService.createTemplateFromFile('PlotDialog');
   htmlTemplate.plotData = JSON.stringify(plotData);
 
-  const finalHtml = htmlTemplate.evaluate()
+  const html = htmlTemplate.evaluate()
     .setWidth(850)
     .setHeight(650)
     .setTitle('SciEng Data Plot');
 
-  SpreadsheetApp.getUi().showModalDialog(finalHtml, 'Data Plot with Uncertainties');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Data Plot with Uncertainties');
 }
 
 function applyPowerToUnit(unitString, power) {
   if (!unitString) return "";
 
-  // 1. Normalize unicode superscripts to standard carets (e.g., m² -> m^2)
   let normalized = String(unitString)
     .replace(/²/g, '^2')
     .replace(/³/g, '^3')
     .replace(/⁻¹/g, '^-1');
-
-  // 2. Parse the base unit and current exponent, then multiply by the new power
-  // This matches a base unit (letters) optionally followed by a caret and numbers
-  let result = normalized.replace(/([a-zA-Z]+)(?:\^([-\d.]+))?/g, (match, base, currentExp) => {
+normalizeunit
+  let result = normalized.replace(/([a-zA-Z°]+)(?:\^([-\d.]+))?/g, (match, base, currentExp) => {
     let exp = currentExp ? parseFloat(currentExp) : 1;
     let newExp = exp * power;
     
-    // Simplify the output based on the new exponent
-    if (newExp === 1) return base;       // m^1 simplifies to just 'm'
-    if (newExp === 0) return "";         // m^0 cancels the unit out completely
-    return base + '^' + newExp;          // Otherwise, return the new powered unit
+    if (newExp === 1) return base;
+    if (newExp === 0) return "";
+    return base + '^' + newExp;
   });
 
-  // 3. (Optional) Convert standard carets back to unicode superscripts for a cleaner spreadsheet look
   return result
     .replace(/\^2(?!\d)/g, '²')
     .replace(/\^3(?!\d)/g, '³')
@@ -823,22 +867,19 @@ const UnitMath = {
     if (!unitStr) return {};
     const dict = {};
     
-    // Normalize unicode superscripts to standard carets
     const norm = String(unitStr).replace(/²/g, '^2').replace(/³/g, '^3').replace(/⁻¹/g, '^-1');
-    
-    // LibreOffice-style parsing: '/' inverts the rest of the expression
     const parts = norm.split('/');
-    this._extractTerms(parts[0], 1, dict); // Numerator
+    this._extractTerms(parts[0], 1, dict);
     
     if (parts.length > 1) {
       const denom = parts.slice(1).join('*'); 
-      this._extractTerms(denom, -1, dict); // Denominator
+      this._extractTerms(denom, -1, dict);
     }
     return this._clean(dict);
   },
   
   _extractTerms: function(str, sign, dict) {
-    const regex = /([a-zA-ZΩ]+)(?:\^([-\d.]+))?/g;
+    const regex = /([a-zA-Z°Ω]+)(?:\^([-\d.]+))?/g;
     let match;
     while ((match = regex.exec(str)) !== null) {
       const base = match[1];
@@ -849,7 +890,7 @@ const UnitMath = {
 
   _clean: function(dict) {
     for (let k in dict) {
-      if (Math.abs(dict[k]) < 1e-10) delete dict[k]; // Remove cancelled units (m^0)
+      if (Math.abs(dict[k]) < 1e-10) delete dict[k];
     }
     return dict;
   },
@@ -876,7 +917,6 @@ const UnitMath = {
   format: function(dict) {
     const num = [], den = [];
     
-    // Alphabetize keys to ensure consistent order (e.g., m·N instead of N·m)
     for (let k of Object.keys(dict).sort()) {
       const exp = dict[k];
       if (exp > 0) num.push(exp === 1 ? k : `${k}^${exp}`);
@@ -887,7 +927,6 @@ const UnitMath = {
     const denStr = den.length > 0 ? '/' + den.join('·') : '';
     const rawStr = numStr + denStr;
     
-    // Dictionary mapping sorted unit components to derived SI units
     const standardUnits = {
       'N·m': 'J', 'A·V': 'W', 'W·s': 'J', 'C·V': 'J', 'A·s': 'C', 'A·Ω': 'V'
     };
